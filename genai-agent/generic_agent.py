@@ -5,7 +5,7 @@ import random
 import sys
 from abc import abstractmethod, ABC
 from datetime import datetime
-from typing import Dict, List, Any, Protocol, runtime_checkable, Type
+from typing import Dict, List, Any, Type
 
 from src.generativeai.llm import LanguageModelClientFactory
 
