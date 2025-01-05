@@ -112,16 +112,35 @@ class GenerativeAgent:
     def __init__(
             self,
             llm_client: LanguageModelClient,
-            tool_registry: ToolRegistry
+            tool_registry: ToolRegistry,
+            system_prompt: str = None,
+            additional_instructions: str = None,
+            enabled_tools: List[str] = None
     ):
         self.llm_client: LanguageModelClient = llm_client
         self.tool_registry: ToolRegistry = tool_registry
         self.logger = logging.getLogger(__name__)
         self.history: List[Dict] = []
+        self.system_prompt: str = system_prompt or "You are an agent "
+        self.additional_instructions: str = additional_instructions or ""
+        self.enabled_tools: List[str] = enabled_tools or list(self.tool_registry.get_all_tools().keys())
 
-    def invoke(self, context: Dict, max_turns: int = 3) -> List[Dict]:
-        """Executes the agent."""
-        available_tools: Dict[str, Tool] = self.tool_registry.get_all_tools()
+    def invoke(self, context: Dict, max_turns: int = 3) -> Dict:
+        """
+        Executes the agent and returns a JSON output summarizing the agent's actions and outcome.
+
+        Args:
+            context (Dict): The initial context for the agent.
+            max_turns (int): The maximum number of turns the agent can take.
+
+        Returns:
+            Dict: A JSON output summarizing the agent's actions, the final status, and any errors encountered.
+        """
+        available_tools: Dict[str, Tool] = {
+            name: tool
+            for name, tool in self.tool_registry.get_all_tools().items()
+            if name in self.enabled_tools
+        }
 
         available_tools_info: List[Dict[str, Any]] = [
             {
@@ -135,10 +154,18 @@ class GenerativeAgent:
         tool_results: List[Dict] = []
         turn_count: int = 0
         reasoning_steps: str = ""
+        outcome = {
+            "success": False,
+            "output": "",
+            "reasoning": "",
+            "actions": [],
+            "errors": []
+        }
 
         if not available_tools_info:
             self.logger.warning("No tools available. Stopping the agent.")
-            return []
+            outcome["reasoning"] = "No tools available."
+            return outcome
 
         while turn_count < max_turns:
             turn_count += 1
@@ -156,11 +183,15 @@ class GenerativeAgent:
             self.logger.info(f"Agent response, turn {turn_count}, response: {response}")
 
             if not isinstance(response, list):
-                self.logger.warning(f"Invalid response format in turn {turn_count}, continuing...")
+                error_message = f"Invalid response format in turn {turn_count}"
+                self.logger.warning(error_message)
+                outcome["errors"].append(error_message)
                 continue
 
             if not response:
                 self.logger.info("LLM indicated completion, stopping execution.")
+                outcome["success"] = True
+                outcome["reasoning"] = "Agent completed the task successfully."
                 break
 
             for tool_call in response:
@@ -188,19 +219,28 @@ class GenerativeAgent:
                         }
                         self.history.append(action_details)
                         tool_results.append(action_details)
+                        outcome["actions"].append(action_details)
 
                         reasoning_steps += f"\nTurn {turn_count}:\n- Reasoning: {reasoning}\n- Action: Calling tool '{tool_name}' with parameters: {parameters}\n"
-                        reasoning_steps += f"- Result: {json.dumps(result)}\n"
+                        reasoning_steps += f"- Result: {json.dumps(result, default=json_serial)}\n"
+                        outcome["output"] = json.dumps(result, default=json_serial)
 
                     except Exception as e:
-                        self.logger.error(f"Error during execution of tool '{tool_name}': {e}")
+                        error_message = f"Error during execution of tool '{tool_name}': {e}"
+                        self.logger.error(error_message)
+                        outcome["errors"].append(error_message)
                         reasoning_steps += f"- Error: {e}\n"
                 else:
-                    self.logger.warning(f"Tool '{tool_name}' not found.")
+                    error_message = f"Tool '{tool_name}' not found."
+                    self.logger.warning(error_message)
+                    outcome["errors"].append(error_message)
                     reasoning_steps += f"- Error: Tool '{tool_name}' not found.\n"
 
-            # print(f"turn_count: {turn_count}")
-        return tool_results
+        # Add final reasoning if the loop completes without a definitive outcome
+        if not outcome["success"]:
+            outcome["reasoning"] = "Agent reached the maximum number of turns without completing the task."
+
+        return outcome
 
     def _create_reasoning_prompt(self,
                                  context: Dict,
@@ -220,25 +260,35 @@ class GenerativeAgent:
 
         history_str = ""
         for action in self.history:
-            history_str += f"- Turn {action['turn']}: Tool '{action['tool_name']}' called with parameters: {json.dumps(action['parameters'])}. Result: {json.dumps(action['result'])}\n"
+            history_str += f"- Turn {action['turn']}: Tool '{action['tool_name']}' called with parameters: {json.dumps(action['parameters'], default=json_serial)}. Result: {json.dumps(action['result'], default=json_serial)}\n"
 
-        prompt: str = f"""
-            You are an agent that needs to decide if using one of the available tools can help you achieve your goal.
+        # Costruisci il prompt con system prompt e istruzioni aggiuntive
+        prompt: str = ""
+        if self.system_prompt:
+            prompt += f"System Prompt:\n{self.system_prompt}\n\n"
+
+        prompt += f"""
+            Decide if using one of the available tools can help you achieve your goal.
             You only have at maximum {turns_left} turns left.
             Current turn number is: {current_turn}
-    
+
             Available tools:
             {json.dumps(tools_description, indent=2)}
-    
+
             Context:
-            {json.dumps(context, indent=2)}
-    
+            {json.dumps(context, indent=2, default=json_serial)}
+
             Action History:
             {history_str}
-    
+
             Previous reasoning steps:
             {reasoning_steps}
-    
+            """
+
+        if self.additional_instructions:
+            prompt += f"\nAdditional Instructions:\n{self.additional_instructions}\n"
+
+        prompt += """
             Instructions:
             - Analyze the context, history, and results of previous actions to determine if the goal has been achieved.
             - Consider the available tools, their descriptions, and their required parameters.
@@ -252,8 +302,8 @@ class GenerativeAgent:
               2. All necessary notifications have been sent
               3. No further actions are needed
             - If you are unsure if the problem is resolved, continue taking appropriate actions.
-            - If return the emtpy array return only [], nothing else.                     
-    
+            - If return the emtpy array return only [], nothing else.
+
             Output format example:
             [
               {{
@@ -265,10 +315,10 @@ class GenerativeAgent:
                 "reasoning": "Explanation of why this tool is being used"
               }}
             ]
-            
+
             Example response ending the process:
             []
-    
+
             JSON Output:
             """
         return prompt
@@ -358,31 +408,20 @@ if __name__ == '__main__':
     tool_registry: ToolRegistry = ToolRegistry()
     tool_registry.register_tools_from_module(sys.modules[__name__])
     llm_client: LanguageModelClient = LanguageModelClientFactory.get_handler()
-    agent: GenerativeAgent = GenerativeAgent(llm_client, tool_registry)
+
+    system_prompt = "You are an expert IT support agent. Your task is to use the provided tools to solve user problems efficiently and accurately."
+    additional_instructions = "After any action, notify the administrator using the 'admin_notification' tool."
+
+
+    agent: GenerativeAgent = GenerativeAgent(llm_client, tool_registry, system_prompt, additional_instructions,
+                                             # enabled_tools=["system_status_checker", "admin_notification"] 
+                                             )
 
     # Run the agent
     context: Dict = {
-        "problem": "I am trying to use CRM but I can't because it is too slow!"
+        "problem": "CRM System is slow"
     }
-    results: List[Dict] = agent.invoke(context, max_turns=10)
+    outcome: Dict = agent.invoke(context, max_turns=10)
 
-    print("### Agent results (grouped by turn):")
-    if not results:
-        print("No tools were used.")
-    else:
-        max_turn = max(result.get("turn", 0) for result in results)
-
-        for turn_number in range(1, max_turn + 1):
-            tools_in_turn = [r for r in results if r.get("turn") == turn_number]
-            if tools_in_turn:
-                print(f"\n--- Turn {turn_number} ---")
-                for tool_info in tools_in_turn:
-                    tool_name = tool_info.get("tool_name")
-                    reasoning = tool_info.get("reasoning")
-                    parameters = tool_info.get("parameters")
-                    result = tool_info.get("result")
-
-                    print(f"  Tool: {tool_name}")
-                    print(f"    Reasoning: {reasoning}")
-                    print(f"    Parameters: {parameters}")
-                    print(f"    Result: {result}")
+    print("### Agent results:")
+    print(json.dumps(outcome, indent=2, default=json_serial))
