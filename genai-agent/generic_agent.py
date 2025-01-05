@@ -3,6 +3,7 @@ import json
 import logging
 import random
 import sys
+from abc import abstractmethod, ABC
 from datetime import datetime
 from typing import Dict, List, Any, Protocol, runtime_checkable, Type
 
@@ -13,31 +14,23 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 
-# --- Interfaces (Protocols) ---
+# --- Abstract Classes ---
 
-@runtime_checkable
-class LanguageModelClient(Protocol):
+class LanguageModelClient(ABC):
     """Defines how a Language Model Client should be implemented."""
 
+    @abstractmethod
     def generate(self, prompt: str, output_json: bool = False) -> Any:
         """Generates a response from the language model."""
-        ...
+        pass
 
-@runtime_checkable
-class Tool(Protocol):
+class Tool(ABC):
     """Defines how a Tool usable by the agent should be implemented."""
 
-    def name(self) -> str:
-        """Returns the name of the tool."""
-        ...
-
-    def description(self) -> str:
-        """Returns the description of the tool."""
-        ...
-
+    @abstractmethod
     def run(self, parameters: Dict) -> Any:
         """Executes the tool with the given parameters."""
-        ...
+        pass
 
 # --- Tool Registry ---
 
