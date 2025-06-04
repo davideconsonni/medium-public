@@ -1,0 +1,5 @@
+dotenv
+langchain
+langchain-google-vertexai
+google-cloud-aiplatform
+browser-use
